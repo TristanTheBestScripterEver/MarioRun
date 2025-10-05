@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Dino Runner — Deluxe v2</title>
+  <style>
+    :root{--accent:#0b5fff;--ui:#ffffff}
+    html,body{height:100%;margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial}
+    .wrap{min-height:100%;display:flex;align-items:center;justify-content:center;padding:20px;background:linear-gradient(#cfe9ff,#eaf6ff)}
+    .card{width:980px;max-width:98vw;background:var(--ui);border-radius:12px;box-shadow:0 14px 40px rgba(20,30,50,.08);padding:16px}
+    header{display:flex;align-items:center;justify-content:space-between}
+    header h1{font-size:18px;margin:0}
+    .controls{display:flex;gap:8px;align-items:center}
+    button{background:var(--accent);color:white;border:0;padding:8px 10px;border-radius:8px;cursor:pointer}
+    button.ghost{background:transparent;border:1px solid #e6e9ef;color:#222}
+    .game-area{display:flex;gap:18px;margin-top:12px}
+    canvas{background:transparent;border-radius:8px;display:block;box-shadow:inset 0 -6px 10px rgba(0,0,0,0.03)}
+    .info{width:300px;max-width:34vw}
+    .info p{margin:8px 0}
+    .hint{font-size:13px;color:#666}
+    footer{margin-top:12px;font-size:13px;color:#666}
+    .muted{color:#666;font-size:13px}
+    @media (max-width:980px){.card{padding:12px}.game-area{flex-direction:column}.info{width:100%}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <header>
+        <h1>Dino Runner — Deluxe v2</h1>
+        <div class="controls">
+          <div style="text-align:right">
+            <div>Score: <strong id="score">0</strong></div>
+            <div class="muted">High: <strong id="highscore">0</strong></div>
+          </div>
+          <button id="restart">Restart</button>
+          <button id="toggle-sound" class="ghost">Sound: on</button>
+        </div>
+      </header>
+
+      <div class="game-area">
+        <canvas id="game" width="820" height="200" aria-label="Dino runner game"></canvas>
+
+        <div class="info">
+          <p><strong>Controls</strong></p>
+          <p class="hint">Space / Up = jump · Down = duck · Tap (mobile) = jump</p>
+
+          <p><strong>Sprites</strong></p>
+          <p class="hint">This build loads <code>images/run.png</code> and <code>images/jump.png</code>. Put them in an <code>images/</code> folder next to this file.</p>
+
+          <p><strong>Visuals</strong></p>
+          <p class="hint">Blue pixel sky gradient, pixel clouds with tint variations, procedurally textured green floor (per-pixel shade variations), dynamic obstacles and birds, landing particles, and a day/night loop.</p>
+
+          <p class="muted">Tip: best sprite height ~40px. The game will auto-split a horizontal run sprite sheet by square frames.</p>
+        </div>
+      </div>
+
+      <footer>
+        Single-file. Drop into your GitHub Pages repo with <code>images/run.png</code> and <code>images/jump.png</code>.
+      </footer>
+    </div>
+  </div>
+
+<script>
+/* Dino Runner — Deluxe v2
+   Features added: pixel sky (stepped), pixel clouds with subtle color difference, procedural textured ground (per-pixel color differences), cactus clusters & birds, particles on landing, day/night cycle.
+   Expects: images/run.png and images/jump.png in images/ folder (run may be a horizontal sprite-sheet)
+*/
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const highEl = document.getElementById('highscore');
+  const restartBtn = document.getElementById('restart');
+  const soundBtn = document.getElementById('toggle-sound');
+
+  const W = canvas.width, H = canvas.height;
+  let running = true, soundOn = true;
+
+  const state = {
+    speed: 6,
+    gravity: 0.9,
+    score: 0,
+    high: Number(localStorage.getItem('dino_high_v3') || 0),
+    obstacles: [],
+    frames: 0,
+    spawnTimer: 0,
+    dayNight: 0, // 0..1 cycle
+    particles: [],
+  };
+  highEl.textContent = state.high;
+
+  const player = {
+    x: 56, y: H - 64, w: 48, h: 48, vy: 0, onGround: true, ducking:false
+  };
+
+  // images
+  const runImg = new Image(); runImg.src = 'images/run.png';
+  const jumpImg = new Image(); jumpImg.src = 'images/jump.png';
+  let runFrames = 1, runFrameW = 0, runFrameH = 0;
+  runImg.onload = () => { runFrameH = runImg.naturalHeight; runFrames = Math.max(1, Math.floor(runImg.naturalWidth / runFrameH)); runFrameW = Math.floor(runImg.naturalWidth / runFrames); };
+
+  // helper: sound beep
+  function beep(freq=260,dur=0.05){ if(!soundOn) return; try{ const a=new (window.AudioContext||window.webkitAudioContext)(); const o=a.createOscillator(); const g=a.createGain(); o.connect(g); g.connect(a.destination); o.type='sine'; o.frequency.value=freq; g.gain.value=0.05; o.start(); g.gain.exponentialRampToValueAtTime(0.0001, a.currentTime+dur); o.stop(a.currentTime+dur+0.02);}catch(e){}
+  }
+
+  // procedural pixel sky gradient (stepped)
+  function drawSky(){
+    // dayNight 0..1 => shift from day to night
+    const t = Math.sin(state.dayNight * Math.PI*2) * 0.5 + 0.5; // 0..1
+    // sky colors day->night
+    const topDay = [135,206,250]; // rgb skyblue
+    const bottomDay = [225,246,255];
+    const topNight = [20,30,60];
+    const bottomNight = [10,15,30];
+    const lerp = (a,b,m) => a + (b-a)*m;
+    // produce stepped bands
+    const bands = 8;
+    for(let i=0;i<bands;i++){
+      const bandT = i / (bands-1);
+      const mix = lerp(lerp(topDay[0], topNight[0], t), lerp(bottomDay[0], bottomNight[0], t), bandT)/255;
+      const r = Math.round(lerp(lerp(topDay[0], topNight[0], t), lerp(bottomDay[0], bottomNight[0], t), bandT));
+      const g = Math.round(lerp(lerp(topDay[1], topNight[1], t), lerp(bottomDay[1], bottomNight[1], t), bandT));
+      const b = Math.round(lerp(lerp(topDay[2], topNight[2], t), lerp(bottomDay[2], bottomNight[2], t), bandT));
+      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      const y0 = Math.floor(i * H / bands);
+      const y1 = Math.floor((i+1) * H / bands);
+      // pixelate by drawing many tiny rects per band
+      for(let y=y0;y<y1;y++){
+        // slight horizontal shimmer per row
+        const offset = Math.floor(Math.sin((state.frames*0.02)+(y*0.05))*1.5);
+        ctx.fillRect(offset, y, W, 1);
+      }
+    }
+  }
+
+  // pixel clouds: composed of small squares with slight color variations
+  const clouds = [];
+  function ensureClouds(){ if(clouds.length>6) return; while(clouds.length<6){ clouds.push({x: Math.random()*W, y: 20+Math.random()*60, w: 28+Math.random()*60, h: 10+Math.random()*10, speed: 0.2+Math.random()*0.6, tint: (Math.random()*30-10) }); }}
+
+  function drawClouds(){
+    ensureClouds();
+    for(const c of clouds){ c.x -= c.speed * (state.speed/6); if(c.x + c.w < -50) c.x = W + Math.random()*120; // wrap
+      // draw pixel cloud
+      for(let px=0; px<c.w; px+=4){ for(let py=0; py<c.h; py+=4){ const shade = Math.floor(240 + (Math.sin((px+py+state.frames*0.5)*0.1)+Math.random()*0.6)*6 + c.tint); ctx.fillStyle = `rgb(${shade},${shade+Math.floor(c.tint/2)},${Math.min(255,shade+8)})`; ctx.fillRect(Math.round(c.x+px), Math.round(c.y+py), 4, 4); }} }
+  }
+
+  // procedural textured ground — per-pixel-ish repeating pattern
+  let groundPatternCanvas = null;
+  function makeGroundPattern(){ const pw = 64, ph = 16; groundPatternCanvas = document.createElement('canvas'); groundPatternCanvas.width = pw; groundPatternCanvas.height = ph; const gctx = groundPatternCanvas.getContext('2d');
+    for(let x=0;x<pw;x++){ for(let y=0;y<ph;y++){ const base = 90 + Math.floor(Math.sin((x*3+y*7)/10 + 1) * 10) + Math.floor(Math.random()*6); // base green variations
+        const r = 20, gr = base+40, b = 20; gctx.fillStyle = `rgb(${r},${gr},${b})`; gctx.fillRect(x,y,1,1); }} }
+
+  function drawGround(){ if(!groundPatternCanvas) makeGroundPattern(); // repeat pattern
+    const img = groundPatternCanvas;
+    ctx.save();
+    // ground band
+    const gh = 28; const gy = H - gh;
+    // draw repeated pattern with horizontal offset based on frames
+    for(let x = - (state.frames*state.speed % img.width); x < W; x += img.width){ ctx.drawImage(img, x, gy, img.width, gh); }
+    // draw a darker base line
+    ctx.fillStyle = '#2a5f2a'; ctx.fillRect(0, H-20, W, 20);
+    ctx.restore();
+  }
+
+  // obstacles: cactus clusters and birds
+  function spawnCactus(){ const cluster = Math.floor(Math.random()*3)+1; const cactus = {type:'cactus', parts:[], x: W + 20, gap: 0}; let offsetX = 0; for(let i=0;i<cluster;i++){ const h = 14 + Math.floor(Math.random()*36); const w = 8 + Math.floor(Math.random()*10); cactus.parts.push({x: offsetX, w, h}); offsetX += w + Math.floor(Math.random()*6); } cactus.wTotal = offsetX; cactus.y = H - 20 - Math.max(...cactus.parts.map(p=>p.h)); state.obstacles.push(cactus); }
+
+  function spawnBird(){ const yOptions = [H-100, H-120, H-140]; const b = {type:'bird', x: W + 40, y: yOptions[Math.floor(Math.random()*yOptions.length)], frame:0}; state.obstacles.push(b); }
+
+  function updateObstacles(){ state.spawnTimer--; if(state.spawnTimer<=0){ // spawn logic depends on score
+      const base = Math.max(60, 180 - Math.floor(state.speed*10)); state.spawnTimer = base + Math.floor(Math.random()*80) - Math.floor(state.speed*2);
+      if(Math.random() < 0.18) spawnCactus(); else if(state.score > 300 && Math.random() < 0.25) spawnBird(); }
+
+    for(let i=state.obstacles.length-1;i>=0;i--){ const o = state.obstacles[i]; o.x -= state.speed; if(o.x + (o.wTotal || 24) < -60) state.obstacles.splice(i,1); }
+  }
+
+  function drawObstacles(){ for(const o of state.obstacles){ if(o.type === 'cactus'){ // draw each part
+        for(const p of o.parts){ const px = Math.round(o.x + p.x); const py = Math.round(o.y + (Math.max(...o.parts.map(pp=>pp.h)) - p.h));
+            // cactus body with slight shade
+            ctx.fillStyle = '#2f8f3b'; ctx.fillRect(px, py, p.w, p.h);
+            ctx.fillStyle = '#2b7f36'; ctx.fillRect(px, py, Math.max(1, Math.floor(p.w/3)), p.h);
+        }
+      } else if(o.type === 'bird'){
+        // simple pixel bird: two squares + wing anim
+        const bx = Math.round(o.x), by = Math.round(o.y);
+        const wing = Math.abs(Math.sin(state.frames * 0.3)) > 0.5 ? 6 : 2;
+        ctx.fillStyle = '#4b4b4b'; ctx.fillRect(bx, by, 14, 8);
+        ctx.fillRect(bx+10, by-wing, 6, 6);
+      }
+    }
+  }
+
+  // particles for landing
+  function spawnLanding(){ for(let i=0;i<8;i++){ state.particles.push({x: player.x + Math.random()*player.w, y: player.y + player.h - 6, vx: (Math.random()-0.5)*2* (state.speed/6), vy: -Math.random()*2 -1, life: 30 + Math.random()*20, color: `rgb(40,${120+Math.floor(Math.random()*80)},40)`}); } }
+  function updateParticles(){ for(let i=state.particles.length-1;i>=0;i--){ const p = state.particles[i]; p.vy += 0.12; p.x += p.vx; p.y += p.vy; p.life--; if(p.life<=0) state.particles.splice(i,1); }}
+  function drawParticles(){ for(const p of state.particles){ const alpha = Math.max(0, p.life/60); ctx.fillStyle = p.color; ctx.globalAlpha = alpha; ctx.fillRect(Math.round(p.x), Math.round(p.y), 2, 2); ctx.globalAlpha = 1; }}
+
+  // collision detection
+  function checkCollision(){ for(const o of state.obstacles){ if(o.type === 'cactus'){ // check per-part
+        for(const p of o.parts){ const ox = o.x + p.x, oy = o.y + (Math.max(...o.parts.map(pp=>pp.h)) - p.h); if(rectIntersects(player.x, player.y + (player.ducking?player.h/2:0), player.w, player.ducking?player.h/2:player.h, ox, oy, p.w, p.h)) return true; }
+      } else if(o.type === 'bird'){ if(rectIntersects(player.x, player.y + (player.ducking?player.h/2:0), player.w, player.ducking?player.h/2:player.h, o.x, o.y, 14, 12)) return true; } }
+    return false; }
+  function rectIntersects(ax,ay,aw,ah,bx,by,bw,bh){ return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by; }
+
+  // update loop
+  function update(){ if(!running) return; state.frames++; // day/night slowly
+    state.dayNight += 0.0006; if(state.dayNight > 1) state.dayNight -= 1;
+    // accelerate
+    if(state.frames % 360 === 0) state.speed += 0.5;
+    // player physics
+    if(!player.onGround){ player.vy += state.gravity; player.y += player.vy; if(player.y >= H - player.h - 20){ player.y = H - player.h - 20; player.vy = 0; player.onGround = true; spawnLanding(); }}
+    // obstacles
+    updateObstacles();
+    // collision
+    if(checkCollision()){ running = false; beep(120,0.18); if(Math.floor(state.score) > state.high){ state.high = Math.floor(state.score); localStorage.setItem('dino_high_v3', state.high); highEl.textContent = state.high; } }
+    // particles
+    updateParticles();
+    // scoring
+    state.score += 0.05 * state.speed; document.getElementById('score').textContent = Math.floor(state.score);
+  }
+
+  // draw loop
+  function draw(){ drawSky(); drawClouds(); drawGround(); drawObstacles(); drawPlayer(); drawParticles(); if(!running) drawGameOver(); }
+
+  function drawPlayer(){ const px = player.x, py = Math.round(player.y);
+    if(!player.onGround){ // jump sprite
+      if(jumpImg.complete){ const scale = Math.min(player.w / jumpImg.naturalWidth, player.h / jumpImg.naturalHeight) || 1; const dw = jumpImg.naturalWidth * scale, dh = jumpImg.naturalHeight * scale; ctx.drawImage(jumpImg, px - (dw-player.w)/2, py - (dh-player.h), dw, dh); } else { ctx.fillStyle='#111'; ctx.fillRect(px,py,player.w,player.h); }
+    } else { // running
+      if(runImg.complete && runFrameW > 0){ const animSpeed = Math.max(3, 12 - Math.floor(state.speed)); const frame = Math.floor(state.frames / animSpeed) % runFrames; ctx.drawImage(runImg, frame*runFrameW, 0, runFrameW, runFrameH, px, py, player.w, player.h);
+      } else if(runImg.complete){ ctx.drawImage(runImg, px, py, player.w, player.h); } else { ctx.fillStyle='#111'; ctx.fillRect(px,py,player.w,player.h); }
+    }
+  }
+
+  function drawGameOver(){ ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(0,0,W,H); ctx.fillStyle='#fff'; ctx.font='18px monospace'; ctx.textAlign='center'; ctx.fillText('Game Over — press Restart or Space', W/2, H/2); }
+
+  function renderLoop(){ ctx.clearRect(0,0,W,H); draw(); requestAnimationFrame(renderLoop); }
+
+  // main loop uses update and render
+  function mainLoop(){ update(); setTimeout(mainLoop, 1000/60); }
+  renderLoop(); mainLoop();
+
+  // inputs
+  window.addEventListener('keydown', (e)=>{ if(e.code === 'Space' || e.code === 'ArrowUp'){ if(!running){ reset(); return; } if(player.onGround){ player.vy = -14 - Math.min(6, state.speed/2); player.onGround = false; beep(520,0.04); } }
+    if(e.code === 'ArrowDown'){ player.ducking = true; setTimeout(()=>player.ducking=false, 300); } });
+  canvas.addEventListener('touchstart', (ev)=>{ ev.preventDefault(); if(!running){ reset(); return; } if(player.onGround){ player.vy = -14 - Math.min(6, state.speed/2); player.onGround = false; beep(520,0.04); } }, {passive:false});
+  restartBtn.addEventListener('click', ()=>{ reset(); beep(440,0.04); });
+  soundBtn.addEventListener('click', ()=>{ soundOn = !soundOn; soundBtn.textContent = 'Sound: ' + (soundOn ? 'on' : 'off'); beep(880,0.03); });
+
+  function reset(){ state.speed = 6; state.score = 0; state.obstacles = []; state.frames = 0; state.spawnTimer = 0; running = true; player.y = H - player.h - 20; player.vy = 0; player.onGround = true; state.particles = []; }
+
+  // small warnings
+  setTimeout(()=>{ if(!runImg.complete) console.warn('Warning: images/run.png failed to load or is missing.'); if(!jumpImg.complete) console.warn('Warning: images/jump.png failed to load or is missing.'); }, 1500);
+
+})();
+</script>
+</body>
+</html>
